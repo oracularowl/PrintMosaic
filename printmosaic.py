@@ -518,7 +518,7 @@ class App(tk.Tk):
         tvwrap = ttk.Frame(left)
         tvwrap.pack(side="top", fill="y", expand=True)
         tv = ttk.Treeview(tvwrap, columns=("inc", "copies"),
-                          show="tree headings", height=18, selectmode="extended")
+                          show="tree headings", height=6, selectmode="extended")
         tv.heading("#0", text="Photo")
         tv.heading("inc", text="✓")
         tv.heading("copies", text="×")

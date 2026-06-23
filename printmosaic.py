@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 PrintMosaic
-===================
+===========
 A desktop app for laying out and printing photos at standard album sizes,
 several to a page, with white borders and cut guides for easy trimming.
 
@@ -10,11 +10,14 @@ Highlights
 * Sizes in CM or INCHES (9x9, 5x7, 10x15 cm, ... or custom).
 * Per-photo crop (drag to pan, scroll to zoom), rotate, and image
   adjustments (brightness / contrast / saturation / black & white).
+* Choose which photos to print (per-photo print on/off), multi-select
+  remove, reorder, and per-photo copies.
 * Smart page packing onto Letter / A4 / Legal / Tabloid / A3, portrait
   or landscape, with adjustable borders, margins, cut lines or crop marks,
   and optional filename captions.
-* Thumbnail list with reorder and per-photo copies; "fill page" helper.
-* Save / open projects, export print-ready PDF, save PNG pages, or print.
+* Light or dark interface.
+* Save / open projects, export print-ready PDF, save PNG pages, or print
+  through a print dialog (copies + printer choice).
 
 Requires: Python 3.8+, Pillow  (pip install pillow)
 Author: built with Claude.  License: MIT.
@@ -41,7 +44,7 @@ except ImportError:
 # Constants
 # --------------------------------------------------------------------------
 APP_NAME = "PrintMosaic"
-APP_VERSION = "2.0"
+APP_VERSION = "2.1"
 CM_PER_IN = 2.54
 PROJECT_EXT = ".pmproj"
 
@@ -87,6 +90,20 @@ IMAGE_FILETYPES = [
     ("Images", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.webp *.heic *.gif"),
     ("All files", "*.*"),
 ]
+
+# Interface palettes
+THEMES = {
+    "light": {
+        "bg": "#f4f4f4", "fg": "#1a1a1a", "field": "#ffffff",
+        "head": "#e6e6e6", "sel": "#3b6ea5", "selfg": "#ffffff",
+        "canvas": "#3a3a3a", "accent": "#1a7a3a", "off": "#a0a0a0",
+    },
+    "dark": {
+        "bg": "#2b2b2b", "fg": "#e8e8e8", "field": "#3c3c3c",
+        "head": "#3a3a3a", "sel": "#4a78b0", "selfg": "#ffffff",
+        "canvas": "#1e1e1e", "accent": "#5fbf7f", "off": "#777777",
+    },
+}
 
 
 # --------------------------------------------------------------------------
@@ -245,6 +262,17 @@ def send_to_printer(path):
         subprocess.run(["lp", path], check=True)
 
 
+def open_in_viewer(path):
+    """Open a file in the OS default app (so the user can use its Print dialog)."""
+    system = platform.system()
+    if system == "Windows":
+        os.startfile(path)  # type: ignore[attr-defined]
+    elif system == "Darwin":
+        subprocess.run(["open", path], check=True)
+    else:
+        subprocess.run(["xdg-open", path], check=True)
+
+
 # --------------------------------------------------------------------------
 # Data model
 # --------------------------------------------------------------------------
@@ -265,6 +293,7 @@ class PhotoItem:
         self.oy = 0.0
         self.rotation = 0
         self.copies = 1
+        self.include = True
         self.brightness = 1.0
         self.contrast = 1.0
         self.saturation = 1.0
@@ -288,6 +317,7 @@ class PhotoItem:
         return {
             "path": self.path, "zoom": self.zoom, "ox": self.ox, "oy": self.oy,
             "rotation": self.rotation, "copies": self.copies,
+            "include": self.include,
             "brightness": self.brightness, "contrast": self.contrast,
             "saturation": self.saturation, "grayscale": self.grayscale,
         }
@@ -300,6 +330,7 @@ class PhotoItem:
         it.oy = d.get("oy", 0.0)
         it.rotation = d.get("rotation", 0)
         it.copies = d.get("copies", 1)
+        it.include = d.get("include", True)
         it.brightness = d.get("brightness", 1.0)
         it.contrast = d.get("contrast", 1.0)
         it.saturation = d.get("saturation", 1.0)
@@ -368,9 +399,11 @@ class App(tk.Tk):
         self._drag = None
         self._suspend = False
 
+        self.dark_var = tk.BooleanVar(value=False)
         self._build_menu()
         self._build_ui()
         self._bind_shortcuts()
+        self.apply_theme(False)
         self.protocol("WM_DELETE_WINDOW", self.on_exit)
         self.on_size_change()
 
@@ -409,6 +442,13 @@ class App(tk.Tk):
         editm.add_command(label="Fill Page with Selected Photo",
                           command=self.fill_page)
         editm.add_separator()
+        editm.add_command(label="Toggle Print On/Off", accelerator="Space",
+                          command=self.toggle_selected_include)
+        editm.add_command(label="Include All in Print",
+                          command=lambda: self.set_all_include(True))
+        editm.add_command(label="Exclude All from Print",
+                          command=lambda: self.set_all_include(False))
+        editm.add_separator()
         editm.add_command(label="Move Up", command=lambda: self.move(-1))
         editm.add_command(label="Move Down", command=lambda: self.move(1))
         editm.add_command(label="Remove Selected", accelerator="Del",
@@ -419,6 +459,9 @@ class App(tk.Tk):
         viewm = tk.Menu(m, tearoff=0)
         viewm.add_command(label="Preview Composed Page…", accelerator="Ctrl+R",
                           command=self.preview_page)
+        viewm.add_separator()
+        viewm.add_checkbutton(label="Dark mode", variable=self.dark_var,
+                              command=lambda: self.apply_theme(self.dark_var.get()))
         m.add_cascade(label="View", menu=viewm)
 
         helpm = tk.Menu(m, tearoff=0)
@@ -460,36 +503,44 @@ class App(tk.Tk):
         # Left: thumbnail list + reorder
         left = ttk.Frame(main, padding=6)
         left.pack(side="left", fill="y")
-        ttk.Label(left, text="Photos").pack(anchor="w")
+        ttk.Label(left, text="Photos  (click the ✓ column to print or skip)"
+                  ).pack(anchor="w")
         tvwrap = ttk.Frame(left)
         tvwrap.pack(side="top", fill="y", expand=True)
-        tv = ttk.Treeview(tvwrap, columns=("copies",), show="tree headings",
-                          height=18, selectmode="browse")
+        tv = ttk.Treeview(tvwrap, columns=("inc", "copies"),
+                          show="tree headings", height=18, selectmode="extended")
         tv.heading("#0", text="Photo")
+        tv.heading("inc", text="✓")
         tv.heading("copies", text="×")
-        tv.column("#0", width=210, stretch=False)
-        tv.column("copies", width=34, anchor="center", stretch=False)
+        tv.column("#0", width=196, stretch=False)
+        tv.column("inc", width=30, anchor="center", stretch=False)
+        tv.column("copies", width=30, anchor="center", stretch=False)
         tv.pack(side="left", fill="y")
         sb = ttk.Scrollbar(tvwrap, orient="vertical", command=tv.yview)
         sb.pack(side="left", fill="y")
         tv.configure(yscrollcommand=sb.set)
         tv.bind("<<TreeviewSelect>>", self.on_select)
-        ttk.Style().configure("Treeview", rowheight=48)
+        tv.bind("<Button-1>", self._on_tree_click, add="+")
+        tv.bind("<space>", lambda e: (self.toggle_selected_include(), "break")[1])
         self.tree = tv
 
         rowbtn = ttk.Frame(left)
         rowbtn.pack(side="bottom", fill="x", pady=(6, 0))
         ttk.Button(rowbtn, text="↑", width=3, command=lambda: self.move(-1)).pack(side="left")
         ttk.Button(rowbtn, text="↓", width=3, command=lambda: self.move(1)).pack(side="left", padx=2)
-        ttk.Button(rowbtn, text="Remove", command=self.remove_selected).pack(side="left", padx=2)
-        ttk.Button(rowbtn, text="Clear", command=self.clear_all).pack(side="left")
+        ttk.Button(rowbtn, text="Print on/off",
+                   command=self.toggle_selected_include).pack(side="left", padx=2)
+        rowbtn2 = ttk.Frame(left)
+        rowbtn2.pack(side="bottom", fill="x", pady=(4, 0))
+        ttk.Button(rowbtn2, text="Remove", command=self.remove_selected).pack(side="left")
+        ttk.Button(rowbtn2, text="Clear All", command=self.clear_all).pack(side="left", padx=2)
 
         # Center: crop preview
         center = ttk.Frame(main, padding=6)
         center.pack(side="left", fill="both", expand=True)
         ttk.Label(center, text="Crop preview  —  drag to move, scroll to zoom"
                   ).pack(anchor="w")
-        self.preview = tk.Canvas(center, bg="#2b2b2b", highlightthickness=0)
+        self.preview = tk.Canvas(center, bg="#3a3a3a", highlightthickness=0)
         self.preview.pack(fill="both", expand=True)
         self.preview.bind("<Configure>", lambda e: self.refresh_preview())
         self.preview.bind("<ButtonPress-1>", self._on_pan_start)
@@ -500,9 +551,9 @@ class App(tk.Tk):
         self.preview.bind("<Button-5>", self._on_zoom_wheel)
 
         # Right: scrollable controls
-        right = ScrollFrame(main, width=300)
-        right.pack(side="right", fill="y")
-        self._build_controls(right.inner)
+        self.scroll = ScrollFrame(main, width=300)
+        self.scroll.pack(side="right", fill="y")
+        self._build_controls(self.scroll.inner)
 
         # Status bar
         self.status = tk.StringVar(value="Add some photos to begin.")
@@ -611,8 +662,8 @@ class App(tk.Tk):
                         command=self._update_fit_label).pack(anchor="w", pady=(4, 0))
 
         self.fit_label = tk.StringVar(value="")
-        ttk.Label(pbox, textvariable=self.fit_label, foreground="#1a7a3a"
-                  ).pack(anchor="w", pady=(4, 0))
+        self.fit_lbl = ttk.Label(pbox, textvariable=self.fit_label)
+        self.fit_lbl.pack(anchor="w", pady=(4, 0))
 
     def _slider(self, parent, label, lo, hi, init):
         ttk.Label(parent, text=label).pack(anchor="w")
@@ -620,6 +671,47 @@ class App(tk.Tk):
         ttk.Scale(parent, from_=lo, to=hi, variable=var,
                   command=lambda e: self.on_adjust_change()).pack(fill="x")
         return var
+
+    # ---- theme -----------------------------------------------------------
+    def apply_theme(self, dark):
+        pal = THEMES["dark" if dark else "light"]
+        st = ttk.Style()
+        try:
+            st.theme_use("clam")
+        except tk.TclError:
+            pass
+        self.configure(bg=pal["bg"])
+        st.configure(".", background=pal["bg"], foreground=pal["fg"],
+                     fieldbackground=pal["field"], bordercolor=pal["head"])
+        for w in ("TFrame", "TLabelframe", "TLabel", "TCheckbutton",
+                  "TRadiobutton"):
+            st.configure(w, background=pal["bg"], foreground=pal["fg"])
+        st.configure("TLabelframe.Label", background=pal["bg"], foreground=pal["fg"])
+        st.configure("TButton", background=pal["head"], foreground=pal["fg"])
+        st.map("TButton", background=[("active", pal["sel"])],
+               foreground=[("active", pal["selfg"])])
+        for w in ("TEntry", "TCombobox", "TSpinbox"):
+            st.configure(w, fieldbackground=pal["field"], foreground=pal["fg"],
+                         background=pal["head"], arrowcolor=pal["fg"])
+        st.map("TCombobox", fieldbackground=[("readonly", pal["field"])],
+               foreground=[("readonly", pal["fg"])])
+        st.configure("Treeview", background=pal["field"], fieldbackground=pal["field"],
+                     foreground=pal["fg"], rowheight=48)
+        st.map("Treeview", background=[("selected", pal["sel"])],
+               foreground=[("selected", pal["selfg"])])
+        st.configure("Treeview.Heading", background=pal["head"], foreground=pal["fg"])
+        st.configure("TScale", background=pal["bg"])
+        st.configure("TScrollbar", background=pal["head"], troughcolor=pal["bg"])
+        st.configure("TSeparator", background=pal["head"])
+        st.configure("Horizontal.TProgressbar", background=pal["sel"])
+        self.preview.configure(bg=pal["canvas"])
+        self.scroll.canvas.configure(bg=pal["bg"])
+        try:
+            self.fit_lbl.configure(foreground=pal["accent"])
+        except Exception:
+            pass
+        self.tree.tag_configure("off", foreground=pal["off"])
+        self.refresh_preview()
 
     # ---- unit / size helpers --------------------------------------------
     def _size_table(self):
@@ -673,6 +765,9 @@ class App(tk.Tk):
             self._update_fit_label()
             self.refresh_preview()
 
+    def _included(self):
+        return [it for it in self.items if it.include]
+
     def _update_fit_label(self):
         try:
             g = compute_grid(self.page_size(), self.cell_size(),
@@ -681,7 +776,7 @@ class App(tk.Tk):
             if g["per_page"] == 0:
                 self.fit_label.set("⚠ Doesn't fit on this page")
             else:
-                total = sum(max(1, it.copies) for it in self.items)
+                total = sum(max(1, it.copies) for it in self._included())
                 sheets = (total + g["per_page"] - 1) // g["per_page"] if total else 0
                 self.fit_label.set(
                     f"{g['cols']} × {g['rows']} = {g['per_page']}/page"
@@ -727,14 +822,16 @@ class App(tk.Tk):
         self.tree.delete(*self.tree.get_children())
         self._thumbs.clear()
         for i, it in enumerate(self.items):
+            check = "✓" if it.include else ""
+            tags = () if it.include else ("off",)
             try:
                 thumb = ImageTk.PhotoImage(it.thumbnail(44))
                 self._thumbs[str(i)] = thumb
                 self.tree.insert("", "end", iid=str(i), text="  " + it.name,
-                                 image=thumb, values=(it.copies,))
+                                 image=thumb, values=(check, it.copies), tags=tags)
             except Exception:
                 self.tree.insert("", "end", iid=str(i), text="  " + it.name,
-                                 values=(it.copies,))
+                                 values=(check, it.copies), tags=tags)
 
     def select_index(self, i):
         if 0 <= i < len(self.items):
@@ -744,6 +841,9 @@ class App(tk.Tk):
     def _selected_index(self):
         sel = self.tree.selection()
         return int(sel[0]) if sel else None
+
+    def _selected_indices(self):
+        return sorted(int(s) for s in self.tree.selection())
 
     def on_select(self, event=None):
         i = self._selected_index()
@@ -765,16 +865,54 @@ class App(tk.Tk):
         self.copies_var.set(it.copies)
         self._suspend = False
 
-    def remove_selected(self):
-        i = self._selected_index()
-        if i is None:
+    def _on_tree_click(self, event):
+        # Toggle print-include when the ✓ column is clicked.
+        if self.tree.identify("region", event.x, event.y) != "cell":
             return
-        del self.items[i]
+        if self.tree.identify_column(event.x) != "#1":
+            return
+        row = self.tree.identify_row(event.y)
+        if not row:
+            return
+        i = int(row)
+        self.items[i].include = not self.items[i].include
+        self._refresh_row(i)
+        self._refresh_status()
+        return "break"
+
+    def _refresh_row(self, i):
+        it = self.items[i]
+        self.tree.set(str(i), "inc", "✓" if it.include else "")
+        self.tree.item(str(i), tags=() if it.include else ("off",))
+
+    def toggle_selected_include(self):
+        idxs = self._selected_indices()
+        if not idxs:
+            return
+        # If any selected is on, turn all off; else turn all on.
+        target = not any(self.items[i].include for i in idxs)
+        for i in idxs:
+            self.items[i].include = target
+            self._refresh_row(i)
+        self._refresh_status()
+
+    def set_all_include(self, value):
+        for i, it in enumerate(self.items):
+            it.include = value
+            self._refresh_row(i)
+        self._refresh_status()
+
+    def remove_selected(self):
+        idxs = self._selected_indices()
+        if not idxs:
+            return
+        for i in reversed(idxs):
+            del self.items[i]
         self.current = None
         self.rebuild_tree()
         self.preview.delete("all")
         if self.items:
-            self.select_index(min(i, len(self.items) - 1))
+            self.select_index(min(idxs[0], len(self.items) - 1))
         self._refresh_status()
 
     def clear_all(self):
@@ -960,9 +1098,10 @@ class App(tk.Tk):
         self.preview.create_image(x, y, anchor="nw", image=self._preview_imgtk)
         self.preview.create_rectangle(x, y, x + disp_w, y + disp_h, outline="#777")
         cw_u, ch_u, unit = self.cell_size_unit()
+        tag = "" if self.current.include else "   ·   (not printing)"
         self.preview.create_text(cw // 2, y + disp_h + 14,
                                  text=f"{cw_u:g} × {ch_u:g} {unit}   ·   "
-                                      f"{self.current.name}", fill="#ccc")
+                                      f"{self.current.name}{tag}", fill="#ccc")
 
     # ---- compose pages ---------------------------------------------------
     def _expanded(self):
@@ -970,6 +1109,8 @@ class App(tk.Tk):
         out_w, out_h = in_to_px(cw_in, self.dpi()), in_to_px(ch_in, self.dpi())
         imgs, caps = [], []
         for it in self.items:
+            if not it.include:
+                continue
             img = it.render(out_w, out_h, export=True)
             for _ in range(max(1, it.copies)):
                 imgs.append(img)
@@ -979,6 +1120,12 @@ class App(tk.Tk):
     def _make_pages(self, progress=None):
         if not self.items:
             messagebox.showinfo("No photos", "Add some photos first.")
+            return None
+        if not self._included():
+            messagebox.showinfo(
+                "Nothing to print",
+                "No photos are marked to print. Click the ✓ column to include "
+                "at least one photo.")
             return None
         cw_in, ch_in = self.cell_size()
         if cw_in <= 0 or ch_in <= 0:
@@ -1084,25 +1231,75 @@ class App(tk.Tk):
         self.status.set(f"Saved {len(pages)} image(s) to {folder}")
         messagebox.showinfo("Saved", f"Saved {len(pages)} PNG page(s) to:\n{folder}")
 
+    # ---- print dialog ----------------------------------------------------
     def print_pages(self):
         pages = self._make_pages()
         if not pages:
             return
-        tmp = os.path.join(tempfile.gettempdir(), "printmosaic_job.pdf")
-        pages[0].save(tmp, "PDF", resolution=float(self.dpi()), save_all=True,
-                      append_images=pages[1:])
-        try:
-            send_to_printer(tmp)
-            self.status.set("Sent to printer.")
-            messagebox.showinfo(
-                "Printing", "Sent the pages to your default printer.\n\n"
-                "Tip: in the printer dialog set scaling to 'Actual size' / "
-                "100% so prints come out at the exact dimensions.")
-        except Exception as e:
-            messagebox.showerror(
-                "Print failed",
-                f"Couldn't auto-print:\n{e}\n\nThe pages were saved here so "
-                f"you can print manually:\n{tmp}")
+        self._print_dialog(pages)
+
+    def _print_dialog(self, pages):
+        win = tk.Toplevel(self)
+        win.title("Print")
+        win.geometry("380x250")
+        win.transient(self)
+        win.grab_set()
+        frm = ttk.Frame(win, padding=14)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Print", font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        ttk.Label(frm, text=f"{len(pages)} page(s) ready at {self.dpi()} DPI."
+                  ).pack(anchor="w", pady=(2, 8))
+
+        crow = ttk.Frame(frm)
+        crow.pack(fill="x", pady=2)
+        ttk.Label(crow, text="Copies of the whole set:").pack(side="left")
+        copies = tk.IntVar(value=1)
+        ttk.Spinbox(crow, from_=1, to=99, width=5, textvariable=copies).pack(side="left", padx=6)
+
+        mode = tk.StringVar(value="default")
+        ttk.Radiobutton(frm, text="Send to default printer",
+                        value="default", variable=mode).pack(anchor="w", pady=(8, 0))
+        ttk.Radiobutton(frm, text="Open in viewer to choose printer && settings",
+                        value="viewer", variable=mode).pack(anchor="w")
+
+        btns = ttk.Frame(frm)
+        btns.pack(side="bottom", fill="x", pady=(12, 0))
+
+        def do_print():
+            n = max(1, int(copies.get()))
+            allpages = pages * n
+            tmp = os.path.join(tempfile.gettempdir(), "printmosaic_job.pdf")
+            try:
+                allpages[0].save(tmp, "PDF", resolution=float(self.dpi()),
+                                 save_all=True, append_images=allpages[1:])
+            except Exception as e:
+                messagebox.showerror("Print failed", str(e), parent=win)
+                return
+            win.destroy()
+            try:
+                if mode.get() == "default":
+                    send_to_printer(tmp)
+                    self.status.set("Sent to default printer.")
+                    messagebox.showinfo(
+                        "Printing", "Sent to your default printer.\n\n"
+                        "Tip: set scaling to 'Actual size' / 100% so prints "
+                        "come out at the exact dimensions.")
+                else:
+                    open_in_viewer(tmp)
+                    self.status.set("Opened in your PDF viewer for printing.")
+                    messagebox.showinfo(
+                        "Print", "Opened the pages in your default viewer.\n"
+                        "Use its File ▸ Print dialog to pick a printer and "
+                        "options. Set scaling to 'Actual size' / 100%.")
+            except Exception as e:
+                messagebox.showerror(
+                    "Print failed",
+                    f"Couldn't print automatically:\n{e}\n\nThe pages were "
+                    f"saved here so you can print manually:\n{tmp}")
+
+        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right")
+        ttk.Button(btns, text="Print", command=do_print).pack(side="right", padx=6)
 
     # ---- project save / load --------------------------------------------
     def _gather_project(self):
@@ -1115,6 +1312,7 @@ class App(tk.Tk):
             "dpi": self.dpi(), "gap": float(self.gap_var.get()),
             "margin": float(self.margin_var.get()),
             "guide": self.guide_var.get(), "caption": self.caption_var.get(),
+            "dark": self.dark_var.get(),
             "items": [it.to_dict() for it in self.items],
         }
 
@@ -1126,7 +1324,7 @@ class App(tk.Tk):
     def save_project_as(self):
         path = filedialog.asksaveasfilename(
             title="Save Project", defaultextension=PROJECT_EXT,
-            filetypes=[("Album project", "*" + PROJECT_EXT)])
+            filetypes=[("PrintMosaic project", "*" + PROJECT_EXT)])
         if path:
             self.project_path = path
             self._write_project(path)
@@ -1143,7 +1341,7 @@ class App(tk.Tk):
     def open_project(self):
         path = filedialog.askopenfilename(
             title="Open Project",
-            filetypes=[("Album project", "*" + PROJECT_EXT), ("All files", "*.*")])
+            filetypes=[("PrintMosaic project", "*" + PROJECT_EXT), ("All files", "*.*")])
         if not path:
             return
         try:
@@ -1172,6 +1370,7 @@ class App(tk.Tk):
         self.margin_var.set(data.get("margin", 0.6))
         self.guide_var.set(data.get("guide", "border"))
         self.caption_var.set(data.get("caption", False))
+        self.dark_var.set(data.get("dark", False))
         self.unit_suffix.set(self.unit_var.get())
         self._suspend = False
 
@@ -1183,6 +1382,7 @@ class App(tk.Tk):
             except Exception:
                 missing.append(d.get("path", "?"))
         self.current = None
+        self.apply_theme(self.dark_var.get())
         self.rebuild_tree()
         self.on_size_change()
         if self.items:
@@ -1195,11 +1395,14 @@ class App(tk.Tk):
 
     # ---- help dialogs ----------------------------------------------------
     def _text_window(self, title, body, w=560, h=460):
+        pal = THEMES["dark" if self.dark_var.get() else "light"]
         win = tk.Toplevel(self)
         win.title(title)
         win.geometry(f"{w}x{h}")
-        txt = tk.Text(win, wrap="word", padx=12, pady=12,
-                      font=("Segoe UI", 10), relief="flat")
+        win.configure(bg=pal["bg"])
+        txt = tk.Text(win, wrap="word", padx=12, pady=12, font=("Segoe UI", 10),
+                      relief="flat", bg=pal["field"], fg=pal["fg"],
+                      insertbackground=pal["fg"])
         txt.insert("1.0", body)
         txt.configure(state="disabled")
         txt.pack(fill="both", expand=True)
@@ -1209,7 +1412,7 @@ class App(tk.Tk):
         self._text_window("User Guide", USER_GUIDE)
 
     def show_shortcuts(self):
-        self._text_window("Keyboard Shortcuts", SHORTCUTS, h=360)
+        self._text_window("Keyboard Shortcuts", SHORTCUTS, h=380)
 
     def show_tips(self):
         self._text_window("Print Tips", PRINT_TIPS, h=360)
@@ -1224,10 +1427,12 @@ class App(tk.Tk):
 
     # ---- status / exit ---------------------------------------------------
     def _refresh_status(self):
-        total = sum(max(1, it.copies) for it in self.items)
+        inc = self._included()
+        total = sum(max(1, it.copies) for it in inc)
         self.status.set(
-            f"{len(self.items)} photo(s), {total} print(s) total  ·  "
-            f"size {self.size_var.get()}  ·  {self.dpi()} DPI")
+            f"{len(self.items)} photo(s), {len(inc)} printing, "
+            f"{total} print(s) total  ·  size {self.size_var.get()}  ·  "
+            f"{self.dpi()} DPI")
         self._update_fit_label()
 
     def on_exit(self):
@@ -1244,35 +1449,45 @@ PrintMosaic — Quick Guide
     Use Add Photos or Add Folder. Photos appear in the left list with
     thumbnails. EXIF rotation is applied automatically.
 
-2.  Choose a print size
-    Pick centimetres (default) or inches, then a preset such as 9 x 9 cm,
-    or Custom and type any width/height. "Landscape photo" swaps W/H.
+2.  Choose which photos to print
+    Each row has a ✓ column. Click it to include or skip that photo without
+    removing it. Use the "Print on/off" button or the Space bar to toggle the
+    selected rows, or Edit ▸ Include All / Exclude All. Skipped photos are
+    greyed out and left off the printed sheets.
 
-3.  Frame each photo
-    Select a photo, then drag inside the preview to move it and scroll to
-    zoom. You can also use the Zoom / Horizontal / Vertical sliders, rotate,
-    and tune Brightness, Contrast, Saturation, or switch to Black & white.
-    "Reset" clears changes; "Apply crop to all" copies them to every photo.
+3.  Remove photos
+    Select one or more rows (Ctrl/Shift-click for several) and press Remove or
+    the Delete key. Clear All empties the list.
 
-4.  Copies & filling pages
-    Set how many Copies of each photo to print, "To all" to apply one count
-    to every photo, or "Fill page" to fill a sheet with the selected photo.
+4.  Choose a print size
+    Pick centimetres (default) or inches, then a preset such as 9 x 9 cm, or
+    Custom and type any width/height. "Landscape photo" swaps W/H.
 
-5.  Page & output
-    Choose paper (Letter, A4, Legal, Tabloid, A3), portrait or landscape,
-    and quality (DPI). Adjust the border/gap between photos and the page
-    margin. Choose cut guides — Lines, Corner marks, or None — and optionally
-    print the filename under each photo. The green text shows how many photos
-    fit per page and how many sheets your job needs.
+5.  Frame each photo
+    Select a photo, then drag inside the preview to move it and scroll to zoom.
+    You can also use the sliders, rotate, and tune Brightness, Contrast,
+    Saturation, or switch to Black & white. "Apply crop to all" copies the
+    current settings to every photo.
 
-6.  Output
-    Preview Page flips through the composed sheets. Then Export PDF (best for
-    sharing/printing later), Save Page Images (PNG per sheet), or Print to
-    send straight to your default printer.
+6.  Copies & filling pages
+    Set Copies of each photo, "To all" to apply one count to every photo, or
+    "Fill page" to fill a sheet with the selected photo.
 
-7.  Projects
-    Save Project stores your layout, sizes, and per-photo edits so you can
-    reopen and reprint later. (It references the original photo files.)
+7.  Page & output
+    Choose paper (Letter, A4, Legal, Tabloid, A3), orientation, and quality
+    (DPI). Adjust border/gap and page margin. Pick cut guides — Lines, Corner
+    marks, or None — and optionally print the filename under each photo. The
+    coloured text shows photos-per-page and how many sheets the job needs.
+
+8.  Output
+    Preview Page flips through the composed sheets. Export PDF, Save Page
+    Images (PNG per sheet), or Print to open the print dialog (set whole-set
+    copies and send to the default printer or open in your viewer to choose
+    a printer).
+
+9.  Dark mode & projects
+    Toggle Dark mode under the View menu. Save Project stores your layout,
+    sizes, theme, and per-photo edits so you can reopen and reprint later.
 """
 
 SHORTCUTS = """\
@@ -1281,12 +1496,17 @@ Keyboard Shortcuts
 Ctrl + O      Add photos
 Ctrl + S      Save project
 Ctrl + E      Export PDF
-Ctrl + P      Print
+Ctrl + P      Print (opens print dialog)
 Ctrl + R      Preview composed page
 Ctrl + [      Rotate selected photo left
 Ctrl + ]      Rotate selected photo right
-Delete        Remove selected photo
+Space         Toggle Print on/off for selected rows
+Delete        Remove selected photo(s)
 F1            User guide
+
+In the photo list:
+Ctrl / Shift + click   Select several photos
+Click the ✓ column     Include or skip a photo for printing
 
 In the preview:
 Drag          Move the photo within the crop
@@ -1298,8 +1518,12 @@ Tips for accurate prints
 
 •  Set DPI to 300 for everyday prints, 600 for very small or detailed ones.
 
-•  In your printer/PDF dialog choose "Actual size" or 100% scaling — never
-   "Fit to page", or your photos will not come out at the exact dimensions.
+•  In the print dialog, "Send to default printer" prints straight away;
+   "Open in viewer" lets you pick a specific printer and paper in your PDF
+   viewer's own Print dialog.
+
+•  Always choose "Actual size" or 100% scaling — never "Fit to page", or your
+   photos will not come out at the exact dimensions.
 
 •  Use matte or glossy photo paper for best results; plain paper works for
    proofs.

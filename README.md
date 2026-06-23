@@ -26,10 +26,17 @@ On some Linux distros Tkinter is separate: `sudo apt install python3-tk`.
   caption under each photo.
 - **Copies & fill** — per-photo copies, "to all", or "fill page" to pack a
   whole sheet with one photo. Live readout of photos-per-page and sheet count.
-- **Thumbnail list** with reorder (up/down) and remove.
-- **Projects** — save/open your layout and edits (`.pmproj`) to reprint later.
+- **Choose what prints** — each photo has a print on/off toggle (click the ✓
+  column or press Space); skipped photos stay in the list but are left off the
+  sheets. Include All / Exclude All in the Edit menu.
+- **Thumbnail list** with multi-select, reorder (up/down), and remove
+  (Ctrl/Shift-click for several, then Remove or Delete).
+- **Dark mode** — toggle a light or dark interface under the View menu.
+- **Projects** — save/open your layout, theme, and edits (`.pmproj`) to reprint
+  later.
 - **Output** — preview the composed pages, export a print-ready PDF, save PNG
-  pages, or print directly.
+  pages, or open a **print dialog** (set whole-set copies, then send to the
+  default printer or open in your viewer to pick a printer).
 
 ## Menus & shortcuts
 
@@ -46,10 +53,4 @@ Preview: drag = move, scroll = zoom
 
 ## Notes
 
-- Renders at the chosen DPI (300 default) for sharp prints.
-- When printing, set the printer/PDF dialog to **Actual size / 100%**, never
-  "Fit to page", so prints come out at the exact dimensions.
-- Small cm prints fit several per Letter sheet (e.g. four 9×9 cm, nine 5×7 cm).
-  A 9×9 *inch* print is wider than Letter — use Tabloid or A3 for large squares.
-- Saved projects reference the original photo files by path; keep those files
-  in place (missing ones are reported on open).
+- Renders at

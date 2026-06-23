@@ -39,12 +39,22 @@ except ImportError:
     print("This app needs Pillow.  Install it with:  pip install pillow")
     sys.exit(1)
 
+# Optional HEIC / HEIF support (e.g. iPhone photos).
+# Enabled automatically when the pillow-heif plugin is installed:
+#     pip install pillow-heif
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+    HEIC_OK = True
+except Exception:
+    HEIC_OK = False
+
 
 # --------------------------------------------------------------------------
 # Constants
 # --------------------------------------------------------------------------
 APP_NAME = "PrintMosaic"
-APP_VERSION = "2.1"
+APP_VERSION = "2.2"
 CM_PER_IN = 2.54
 PROJECT_EXT = ".pmproj"
 
@@ -787,12 +797,22 @@ class App(tk.Tk):
     # ---- photo management ------------------------------------------------
     def _add_paths(self, paths):
         added = 0
+        heic_problem = False
         for p in paths:
             try:
                 self.items.append(PhotoItem(p))
                 added += 1
             except Exception as e:
-                messagebox.showwarning("Skipped", f"Couldn't load:\n{p}\n\n{e}")
+                if p.lower().endswith((".heic", ".heif")) and not HEIC_OK:
+                    heic_problem = True
+                else:
+                    messagebox.showwarning("Skipped", f"Couldn't load:\n{p}\n\n{e}")
+        if heic_problem:
+            messagebox.showwarning(
+                "HEIC support not installed",
+                "Some HEIC/HEIF photos couldn't be opened.\n\n"
+                "Install the free plugin, then restart " + APP_NAME + ":\n\n"
+                "    pip install pillow-heif")
         if added:
             self.rebuild_tree()
             self.select_index(len(self.items) - 1)

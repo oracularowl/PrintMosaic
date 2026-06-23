@@ -12,6 +12,12 @@ pip install pillow
 python printmosaic.py
 ```
 
+For HEIC / HEIF photos (e.g. from an iPhone), also install the plugin:
+
+```
+pip install pillow-heif
+```
+
 On some Linux distros Tkinter is separate: `sudo apt install python3-tk`.
 
 ## Features
@@ -46,11 +52,4 @@ page), Help (User Guide, Shortcuts, Print Tips, About).
 
 ```
 Ctrl+O Add photos   Ctrl+S Save project   Ctrl+E Export PDF
-Ctrl+P Print        Ctrl+R Preview page   Ctrl+[ / ] Rotate
-Del Remove          F1 User guide
-Preview: drag = move, scroll = zoom
-```
-
-## Notes
-
-- Renders at
+Ctrl+P Print        Ctrl+R Preview page   Ctrl+[ / ]

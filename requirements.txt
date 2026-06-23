@@ -1,1 +1,4 @@
 Pillow>=9.0
+
+# Optional: enables HEIC / HEIF photos (e.g. iPhone). Remove if not needed.
+pillow-heif>=0.10
